@@ -1,4 +1,5 @@
-openai-agents
-fastapi
-uvicorn
-python-dotenv
+fastapi==0.110.1
+uvicorn==0.27.1
+openai-agents==0.2.2
+python-dotenv==1.0.1
+requests==2.32.3
