@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel, RunConfig, function_tool
@@ -7,17 +7,28 @@ import os
 import requests
 import urllib.parse
 import uvicorn
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(
+    title="Rhistae Matchmaker API",
+    description="API for finding perfect matches",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url=None
+)
 
 # Enhanced CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
@@ -73,6 +84,7 @@ def find_match(age: int, gender: str):
     sanity = SanityConnection()
     valid, msg = sanity.validate_connection()
     if not valid:
+        logger.error(f"Sanity connection failed: {msg}")
         return []
     
     query = f"""
@@ -101,17 +113,57 @@ def find_match(age: int, gender: str):
         data = response.json()
         return data.get("result", [])
     except Exception as e:
-        print(f"Sanity query failed: {str(e)}")
+        logger.error(f"Sanity query failed: {str(e)}")
         return []
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to Rhistae Matchmaker API",
+        "endpoints": {
+            "find_match": {
+                "method": "POST",
+                "path": "/api/find-match/",
+                "description": "Find matches based on age and gender"
+            },
+            "health_check": {
+                "method": "GET",
+                "path": "/health",
+                "description": "Check service health"
+            }
+        },
+        "documentation": "/docs"
+    }
 
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "Rhistae Matchmaker"}
+    sanity = SanityConnection()
+    sanity_status, sanity_msg = sanity.validate_connection()
+    
+    whatsapp_status = all([
+        os.getenv("ULTRASMART_INSTANCE_ID"),
+        os.getenv("ULTRASMART_API_KEY")
+    ])
+    
+    gemini_status = bool(os.getenv("GEMINI_Api"))
+    
+    return {
+        "status": "healthy",
+        "service": "Rhistae Matchmaker",
+        "version": "1.0.0",
+        "dependencies": {
+            "sanity": sanity_status,
+            "whatsapp_api": whatsapp_status,
+            "gemini_ai": gemini_status
+        }
+    }
 
 # Initialize Gemini AI components
 GEMINI_API = os.getenv("GEMINI_Api")
 if not GEMINI_API:
+    logger.error("Missing GEMINI_Api in environment variables")
     raise ValueError("Missing GEMINI_Api in environment variables")
 
 external_client = AsyncOpenAI(
@@ -163,15 +215,27 @@ class MatchRequest(BaseModel):
     number: str
 
 @app.post("/api/find-match/")
-async def get_match(data: MatchRequest):
+async def get_match(data: MatchRequest, request: Request):
+    logger.info(f"Received match request from {request.client.host}")
+    logger.debug(f"Request data: {data.dict()}")
+
     try:
         # Validate input
         if data.age < 18 or data.age > 60:
-            raise HTTPException(status_code=400, detail="Age must be between 18-60")
+            logger.warning(f"Invalid age received: {data.age}")
+            raise HTTPException(
+                status_code=400,
+                detail="Age must be between 18-60"
+            )
         
         if not data.number.startswith('+'):
-            raise HTTPException(status_code=400, detail="WhatsApp number must include country code (e.g. +92...)")
+            logger.warning(f"Invalid WhatsApp number format: {data.number}")
+            raise HTTPException(
+                status_code=400,
+                detail="WhatsApp number must include country code (e.g. +92...)"
+            )
 
+        logger.info("Starting matchmaking process...")
         prompt = f"""
 Find matches for:
 - Age: {data.age}
@@ -185,12 +249,22 @@ Then send to WhatsApp: {data.number}
             run_config=config,
         )
         
-        return {"message": result.final_output, "success": True}
-    except HTTPException:
+        logger.info("Matchmaking completed successfully")
+        return {
+            "message": result.final_output,
+            "success": True,
+            "matches_found": "No suitable matches found" not in result.final_output
+        }
+        
+    except HTTPException as he:
+        logger.error(f"Validation error: {he.detail}")
         raise
     except Exception as e:
-        print(f"Error in matchmaking: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Unexpected error in matchmaking: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error. Please try again later."
+        )
 
 if __name__ == "__main__":
     uvicorn.run(
@@ -199,5 +273,6 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 8000)),
         reload=False,
         workers=1,
-        timeout_keep_alive=60
+        timeout_keep_alive=60,
+        log_level="info"
     )
