@@ -12,12 +12,14 @@ load_dotenv()
 
 app = FastAPI()
 
+# Enhanced CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 class SanityConnection:
@@ -98,10 +100,16 @@ def find_match(age: int, gender: str):
         
         data = response.json()
         return data.get("result", [])
-    except Exception:
+    except Exception as e:
+        print(f"Sanity query failed: {str(e)}")
         return []
 
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "Rhistae Matchmaker"}
 
+# Initialize Gemini AI components
 GEMINI_API = os.getenv("GEMINI_Api")
 if not GEMINI_API:
     raise ValueError("Missing GEMINI_Api in environment variables")
@@ -157,6 +165,13 @@ class MatchRequest(BaseModel):
 @app.post("/api/find-match/")
 async def get_match(data: MatchRequest):
     try:
+        # Validate input
+        if data.age < 18 or data.age > 60:
+            raise HTTPException(status_code=400, detail="Age must be between 18-60")
+        
+        if not data.number.startswith('+'):
+            raise HTTPException(status_code=400, detail="WhatsApp number must include country code (e.g. +92...)")
+
         prompt = f"""
 Find matches for:
 - Age: {data.age}
@@ -171,5 +186,18 @@ Then send to WhatsApp: {data.number}
         )
         
         return {"message": result.final_output, "success": True}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error in matchmaking: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),
+        reload=False,
+        workers=1,
+        timeout_keep_alive=60
+    )
